@@ -136,7 +136,10 @@
   </build>
   <profiles>
     <profile>
-      <id>docker</id>
+      <id>container-image</id>
+      <properties>
+        <quarkus.container-image.build>true</quarkus.container-image.build>
+      </properties>
       <dependencies>
         <dependency>
           <groupId>io.quarkus</groupId>

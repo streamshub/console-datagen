@@ -52,8 +52,9 @@ jobs:
           export QUARKUS_CONTAINER_IMAGE_PASSWORD="${{ secrets.IMAGE_REPO_PASSWORD }}"
           export QUARKUS_CONTAINER_IMAGE_PUSH="true"
           export GIT_REVISION=$(git rev-parse --short release)
+
           # Build and push the release images using the commit tagged in `release:prepare`
-          mvn -B -P docker release:perform
+          mvn -B -P container-image release:perform
 
       - name: Push Release Tag
         run: |

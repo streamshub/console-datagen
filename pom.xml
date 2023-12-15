@@ -17,6 +17,11 @@
     <skipITs>true</skipITs>
     <surefire-plugin.version>3.2.3</surefire-plugin.version>
   </properties>
+  <scm>
+    <connection>scm:git:git://github.com/eyefloaters/console-datagen.git</connection>
+    <developerConnection>scm:git:git@github.com:eyefloaters/console-datagen.git</developerConnection>
+    <tag>HEAD</tag>
+  </scm>
   <dependencyManagement>
     <dependencies>
       <dependency>

@@ -2,11 +2,13 @@ package com.github.eyefloaters;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -17,19 +19,25 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.Function;
+import java.util.stream.Collector;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.event.Shutdown;
 import jakarta.enterprise.event.Startup;
+import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Inject;
 import jakarta.inject.Named;
 import jakarta.json.Json;
 
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.ConsumerGroupListing;
+import org.apache.kafka.clients.admin.ListConsumerGroupsOptions;
 import org.apache.kafka.clients.admin.ListOffsetsResult.ListOffsetsResultInfo;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.admin.OffsetSpec;
@@ -42,8 +50,11 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
-import org.apache.kafka.common.KafkaFuture;
+import org.apache.kafka.common.ConsumerGroupState;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.GroupIdNotFoundException;
+import org.apache.kafka.common.errors.GroupNotEmptyException;
+import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 import org.jboss.logging.MDC;
@@ -94,9 +105,20 @@ public class DataGenerator {
     AtomicBoolean running = new AtomicBoolean(true);
     Random generator = new Random();
 
+    @Produces
+    @ApplicationScoped
+    @Named("adminClients")
     Map<String, Admin> adminClients = new HashMap<>();
-    Map<String, Map<TopicPartition , Long>> recordsConsumed = new ConcurrentHashMap<>();
+
+    @Produces
+    @ApplicationScoped
+    @Named("recordsProduced")
     Map<String, Map<TopicPartition , Long>> recordsProduced = new ConcurrentHashMap<>();
+
+    @Produces
+    @ApplicationScoped
+    @Named("recordsConsumed")
+    Map<String, Map<TopicPartition , Long>> recordsConsumed = new ConcurrentHashMap<>();
 
     void start(@Observes Startup startupEvent /* NOSONAR */) {
         if (!datagenEnabled) {
@@ -104,23 +126,33 @@ public class DataGenerator {
             return;
         }
 
-        adminConfigs.forEach((clusterKey, configProperties) -> {
+        AtomicInteger clientCount = new AtomicInteger(0);
+
+        adminConfigs.forEach((clusterKey, configProperties) ->
             virtualExec.submit(() -> {
                 MDC.put(CLUSTER_NAME_KEY, clusterKey);
 
                 Admin adminClient = Admin.create(configProperties);
                 adminClients.put(clusterKey, adminClient);
 
+                var allTopics = IntStream
+                        .range(0, consumerCount)
+                        .mapToObj(groupNumber -> IntStream
+                                .range(0, topicsPerConsumer)
+                                .mapToObj(t -> topicNameTemplate.formatted(groupNumber, (char) ('a' + t))))
+                        .flatMap(Function.identity())
+                        .toList();
+
+                initialize(clusterKey, adminClient, allTopics, partitionsPerTopic);
+
                 IntStream.range(0, consumerCount).forEach(groupNumber -> {
                     var topics = IntStream.range(0, topicsPerConsumer)
                             .mapToObj(t -> topicNameTemplate.formatted(groupNumber, (char) ('a' + t)))
                             .toList();
 
-                    initialize(adminClient, topics, partitionsPerTopic);
-
                     virtualExec.submit(() -> {
                         var configs = new HashMap<>(producerConfigs.get(clusterKey));
-                        String clientId = "console-datagen-producer-" + groupNumber;
+                        String clientId = "console-datagen-producer-" + groupNumber + "-" + clientCount.incrementAndGet();
                         configs.put(ProducerConfig.CLIENT_ID_CONFIG, clientId);
 
                         MDC.put(CLUSTER_NAME_KEY, clusterKey);
@@ -140,7 +172,7 @@ public class DataGenerator {
                     virtualExec.submit(() -> {
                         var configs = new HashMap<>(consumerConfigs.get(clusterKey));
                         String groupId = "console-datagen-group-" + groupNumber;
-                        String clientId = "console-datagen-consumer-" + groupNumber;
+                        String clientId = "console-datagen-consumer-" + groupNumber + "-" + clientCount.incrementAndGet();
 
                         configs.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
                         configs.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId);
@@ -161,8 +193,7 @@ public class DataGenerator {
                         log.infof("Run loop complete for consumer group %s", groupId);
                     });
                 });
-            });
-        });
+            }));
     }
 
     void stop(@Observes Shutdown shutdownEvent /* NOSONAR */) throws Exception {
@@ -178,8 +209,19 @@ public class DataGenerator {
         virtualExec.awaitTermination(10, TimeUnit.SECONDS);
     }
 
-    void initialize(Admin adminClient, List<String> topics, int partitionsPerTopic) {
-        List<String> dataGenGroups = adminClient.listConsumerGroups()
+    void initialize(String clusterKey, Admin adminClient, List<String> topics, int partitionsPerTopic) {
+        adminClient.describeCluster()
+            .clusterId()
+            .toCompletionStage()
+            .thenAccept(clusterId -> {
+                MDC.put(CLUSTER_NAME_KEY, clusterKey);
+                log.infof("Initializing cluster %s (id=%s)", clusterKey, clusterId);
+            })
+            .toCompletableFuture()
+            .join();
+
+        List<String> dataGenGroups = adminClient.listConsumerGroups(new ListConsumerGroupsOptions()
+                .inStates(Set.of(ConsumerGroupState.EMPTY)))
             .all()
             .toCompletionStage()
             .toCompletableFuture()
@@ -187,26 +229,51 @@ public class DataGenerator {
             .stream()
             .map(ConsumerGroupListing::groupId)
             .filter(name -> name.startsWith("console-datagen-group-"))
-            .toList();
+            .collect(Collectors.toCollection(ArrayList::new));
+
+        log.infof("Deleting existing consumer groups %s", dataGenGroups);
 
         adminClient.deleteConsumerGroups(dataGenGroups)
-            .all()
-            .toCompletionStage()
-            .exceptionally(error -> {
-                log.warnf(error, "Error deleting consumer groups: %s", error.getMessage());
+            .deletedGroups()
+            .entrySet()
+            .stream()
+            .map(e -> e.getValue().toCompletionStage().exceptionally(error -> {
+                if (error instanceof CompletionException ce) {
+                    error = ce.getCause();
+                }
+
+                if (error instanceof GroupNotEmptyException) {
+                    log.warnf("Consumer group %s is not empty and cannot be deleted", e.getKey());
+                } else if (error instanceof GroupIdNotFoundException) {
+                    // Ignore
+                } else {
+                    log.warnf(error, "Error deleting consumer group %s: %s", e.getKey(), error.getMessage());
+                }
                 return null;
-            })
-            .toCompletableFuture()
+            }))
+            .map(CompletionStage::toCompletableFuture)
+            .collect(awaitingAll())
             .join();
 
+        log.infof("Deleting existing topics %s", topics);
+
         adminClient.deleteTopics(topics)
-            .all()
-            .toCompletionStage()
-            .exceptionally(error -> {
-                log.warnf(error, "Error deleting topics: %s", error.getMessage());
+            .topicNameValues()
+            .entrySet()
+            .stream()
+            .map(e -> e.getValue().toCompletionStage().exceptionally(error -> {
+                if (error instanceof CompletionException ce) {
+                    error = ce.getCause();
+                }
+
+                if (!(error instanceof UnknownTopicOrPartitionException)) {
+                    log.warnf(error, "Error deleting topic %s: %s", e.getKey(), error.getMessage());
+                }
                 return null;
-            })
-            .toCompletableFuture()
+            }))
+            .map(CompletionStage::toCompletableFuture)
+            .collect(awaitingAll())
+            .thenRun(() -> LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(5)))
             .join();
 
         var newTopics = topics.stream()
@@ -218,20 +285,35 @@ public class DataGenerator {
                                 "segment.ms", Long.toString(TimeUnit.MINUTES.toMillis(10)))))
                 .toList();
 
-        log.debugf("Creating topics: %s", topics);
+        log.infof("Creating topics: %s", topics);
 
-        var pending = adminClient.createTopics(newTopics)
+        adminClient.createTopics(newTopics)
             .values()
-            .values()
+            .entrySet()
             .stream()
-            .map(KafkaFuture::toCompletionStage)
-            .map(CompletionStage::toCompletableFuture)
-            .toArray(CompletableFuture[]::new);
+            .map(e -> e.getValue().toCompletionStage().exceptionally(error -> {
+                if (error instanceof CompletionException ce) {
+                    error = ce.getCause();
+                }
 
-        CompletableFuture.allOf(pending)
+                log.warnf(error, "Error creating topic %s: %s", e.getKey(), error.getMessage());
+                return null;
+            }))
+            .map(CompletionStage::toCompletableFuture)
+            .collect(awaitingAll())
             .thenRun(() -> LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(5)))
             .thenRun(() -> log.infof("Topics created: %s", topics))
             .join();
+
+        Map<TopicPartition, Long> initialCounts = topics.stream()
+                .flatMap(topic -> IntStream
+                        .range(0, partitionsPerTopic)
+                        .mapToObj(p -> new TopicPartition(topic, p)))
+                .map(topicPartition -> Map.entry(topicPartition, 0L))
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
+        recordsProduced.put(clusterKey, new ConcurrentHashMap<>(initialCounts));
+        recordsConsumed.put(clusterKey, new ConcurrentHashMap<>(initialCounts));
     }
 
     void produce(String clusterKey, Producer<byte[], byte[]> producer, List<String> topics) {
@@ -293,8 +375,7 @@ public class DataGenerator {
     }
 
     long incrementAndGet(Map<String, Map<TopicPartition , Long>> counters, String clusterKey, TopicPartition topicPartition) {
-        return counters
-            .computeIfAbsent(clusterKey, k -> new ConcurrentHashMap<>())
+        return counters.get(clusterKey)
             .compute(topicPartition, (k, v) -> v == null ? 1 : v + 1);
     }
 
@@ -342,5 +423,10 @@ public class DataGenerator {
                 throw new CompletionException(e.getCause());
             }
         }, virtualExec);
+    }
+
+    static <F extends Object> Collector<CompletableFuture<F>, ?, CompletableFuture<Void>> awaitingAll() {
+        return Collectors.collectingAndThen(Collectors.toList(), pending ->
+            CompletableFuture.allOf(pending.toArray(CompletableFuture[]::new)));
     }
 }

@@ -45,7 +45,13 @@ abstract class CounterProgressCheck {
                             .computeIfAbsent(clusterKey, k -> new ConcurrentHashMap<>(prevCounts.size()))
                             .put(partition, now);
                     } else {
-                        log.infof("Counter %s/%s unchanged from %d", checkName, partition, prevCount);
+                        var lastUpdate = latestRecordActivityTimes
+                            .computeIfAbsent(clusterKey, k -> new ConcurrentHashMap<>(prevCounts.size()))
+                            .get(partition);
+
+                        log.infof("Counter %s/%s in cluster %s unchanged from %d at %s",
+                                checkName, partition, clusterKey, prevCount, lastUpdate);
+
                         latestRecordActivityTimes
                             .computeIfAbsent(clusterKey, k -> new ConcurrentHashMap<>(prevCounts.size()))
                             // Only set the time if not set since startup
@@ -94,7 +100,7 @@ abstract class CounterProgressCheck {
 
         boolean up = true;
 
-        if (inactivePartitions > 0 || latestRecordActivityTimes.isEmpty()) {
+        if (inactivePartitions > 0) {
             up = false;
         }
 

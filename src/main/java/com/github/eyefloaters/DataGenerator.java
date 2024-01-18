@@ -132,9 +132,6 @@ public class DataGenerator {
             virtualExec.submit(() -> {
                 MDC.put(CLUSTER_NAME_KEY, clusterKey);
 
-                Admin adminClient = Admin.create(configProperties);
-                adminClients.put(clusterKey, adminClient);
-
                 var allTopics = IntStream
                         .range(0, consumerCount)
                         .mapToObj(groupNumber -> IntStream
@@ -142,6 +139,11 @@ public class DataGenerator {
                                 .mapToObj(t -> topicNameTemplate.formatted(groupNumber, (char) ('a' + t))))
                         .flatMap(Function.identity())
                         .toList();
+
+                initializeCounts(clusterKey, allTopics);
+
+                Admin adminClient = Admin.create(configProperties);
+                adminClients.put(clusterKey, adminClient);
 
                 initialize(clusterKey, adminClient, allTopics, partitionsPerTopic);
 
@@ -209,6 +211,18 @@ public class DataGenerator {
         virtualExec.awaitTermination(10, TimeUnit.SECONDS);
     }
 
+    void initializeCounts(String clusterKey, List<String> topics) {
+        Map<TopicPartition, Long> initialCounts = topics.stream()
+                .flatMap(topic -> IntStream
+                        .range(0, partitionsPerTopic)
+                        .mapToObj(p -> new TopicPartition(topic, p)))
+                .map(topicPartition -> Map.entry(topicPartition, 0L))
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
+        recordsProduced.put(clusterKey, new ConcurrentHashMap<>(initialCounts));
+        recordsConsumed.put(clusterKey, new ConcurrentHashMap<>(initialCounts));
+    }
+
     void initialize(String clusterKey, Admin adminClient, List<String> topics, int partitionsPerTopic) {
         adminClient.describeCluster()
             .clusterId()
@@ -238,9 +252,7 @@ public class DataGenerator {
             .entrySet()
             .stream()
             .map(e -> e.getValue().toCompletionStage().exceptionally(error -> {
-                if (error instanceof CompletionException ce) {
-                    error = ce.getCause();
-                }
+                error = causeIfCompletionException(error);
 
                 if (error instanceof GroupNotEmptyException) {
                     log.warnf("Consumer group %s is not empty and cannot be deleted", e.getKey());
@@ -262,9 +274,7 @@ public class DataGenerator {
             .entrySet()
             .stream()
             .map(e -> e.getValue().toCompletionStage().exceptionally(error -> {
-                if (error instanceof CompletionException ce) {
-                    error = ce.getCause();
-                }
+                error = causeIfCompletionException(error);
 
                 if (!(error instanceof UnknownTopicOrPartitionException)) {
                     log.warnf(error, "Error deleting topic %s: %s", e.getKey(), error.getMessage());
@@ -292,10 +302,7 @@ public class DataGenerator {
             .entrySet()
             .stream()
             .map(e -> e.getValue().toCompletionStage().exceptionally(error -> {
-                if (error instanceof CompletionException ce) {
-                    error = ce.getCause();
-                }
-
+                error = causeIfCompletionException(error);
                 log.warnf(error, "Error creating topic %s: %s", e.getKey(), error.getMessage());
                 return null;
             }))
@@ -304,16 +311,10 @@ public class DataGenerator {
             .thenRun(() -> LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(5)))
             .thenRun(() -> log.infof("Topics created: %s", topics))
             .join();
+    }
 
-        Map<TopicPartition, Long> initialCounts = topics.stream()
-                .flatMap(topic -> IntStream
-                        .range(0, partitionsPerTopic)
-                        .mapToObj(p -> new TopicPartition(topic, p)))
-                .map(topicPartition -> Map.entry(topicPartition, 0L))
-                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-
-        recordsProduced.put(clusterKey, new ConcurrentHashMap<>(initialCounts));
-        recordsConsumed.put(clusterKey, new ConcurrentHashMap<>(initialCounts));
+    Throwable causeIfCompletionException(Throwable thrown) {
+        return thrown instanceof CompletionException ? thrown.getCause() : thrown;
     }
 
     void produce(String clusterKey, Producer<byte[], byte[]> producer, List<String> topics) {
@@ -345,7 +346,7 @@ public class DataGenerator {
                     var currentCount = incrementAndGet(recordsProduced, clusterKey, topicPartition);
 
                     if (currentCount % 5_000 == 0) {
-                        log.infof("Produced %d records to %s/%s (since startup)", currentCount, clusterKey, topicPartition);
+                        log.infof("Produced %d records to %s (since startup)", currentCount, topicPartition);
                     }
                 })
                 .exceptionally(error -> {
@@ -379,7 +380,7 @@ public class DataGenerator {
             .compute(topicPartition, (k, v) -> v == null ? 1 : v + 1);
     }
 
-    void maybeDeleteRecords(Admin adminClient, TopicPartition topicPartition, long offset) {
+    void maybeDeleteRecords(Admin adminClient, TopicPartition topicPartition, Long offset) {
         var earliest = getOffset(adminClient, topicPartition, OffsetSpec.earliest());
         var latest = getOffset(adminClient, topicPartition, OffsetSpec.latest());
 
@@ -388,16 +389,15 @@ public class DataGenerator {
                 long diff = latest.join() - earliest.join();
 
                 if (diff >= 5_000) {
-                    log.infof("Offset diff is %d, truncating topic %s, partition %d to offset %d",
-                            diff, topicPartition.topic(), topicPartition.partition(), offset);
+                    log.infof("Offset diff is %d, truncating partition %d to offset %d",
+                            diff, topicPartition, offset);
                     // Truncate the topic to the up to the previous offset
                     var recordsToDelete = Map.of(topicPartition, RecordsToDelete.beforeOffset(offset));
                     return adminClient.deleteRecords(recordsToDelete)
                         .all()
                         .toCompletionStage();
                 } else {
-                    log.debugf("Offset diff is %d for topic %s, partition %d at offset %d",
-                            diff, topicPartition.topic(), topicPartition.partition(), offset);
+                    log.debugf("Offset diff is %d for partition %d at offset %d", diff, topicPartition, offset);
                     return CompletableFuture.completedStage(null);
                 }
             }, virtualExec)

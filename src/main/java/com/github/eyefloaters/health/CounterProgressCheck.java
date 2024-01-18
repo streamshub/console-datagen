@@ -65,16 +65,16 @@ abstract class CounterProgressCheck {
                 .flatMap(Collection::stream)
                 .map(Map.Entry::getValue)
                 .min(Instant::compareTo)
-                .map(Object::toString)
-                .orElse("NA");
+                .orElse(Instant.EPOCH)
+                .toString();
         String latestActivity = latestRecordActivityTimes.values()
                 .stream()
                 .map(Map::entrySet)
                 .flatMap(Collection::stream)
                 .map(Map.Entry::getValue)
                 .max(Instant::compareTo)
-                .map(Object::toString)
-                .orElse("NA");
+                .orElse(Instant.EPOCH)
+                .toString();
         long currentCount = recordsCounts
                 .values()
                 .stream()
@@ -90,7 +90,7 @@ abstract class CounterProgressCheck {
 
         boolean up = true;
 
-        if (inactivePartitions > 0) {
+        if (inactivePartitions > 0 || latestRecordActivityTimes.isEmpty()) {
             up = false;
         }
 

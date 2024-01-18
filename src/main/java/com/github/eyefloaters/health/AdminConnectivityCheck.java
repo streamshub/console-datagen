@@ -16,15 +16,19 @@ import org.eclipse.microprofile.health.Liveness;
 public class AdminConnectivityCheck implements HealthCheck {
 
     @Inject
+    @Named("adminConfigs")
+    Map<String, Map<String, Object>> adminConfigs;
+
+    @Inject
     @Named("adminClients")
     Map<String, Admin> adminClients;
 
     @Override
     public HealthCheckResponse call() {
-        var builder = HealthCheckResponse.builder().name("generator-liveness");
+        var builder = HealthCheckResponse.builder().name("admin-connectivity");
         boolean up = true;
 
-        long configuredClusters = adminClients.size();
+        long configuredClusters = adminConfigs.size();
         long availableClusters = adminClients.values()
             .stream()
             .map(client -> client.describeCluster()

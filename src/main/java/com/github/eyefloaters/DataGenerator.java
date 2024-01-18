@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -268,23 +269,31 @@ public class DataGenerator {
             .join();
 
         log.infof("Deleting existing topics %s", topics);
+        Set<String> remainingTopics = new HashSet<>();
+        int deleteTopicsMax = 10;
 
-        adminClient.deleteTopics(topics)
-            .topicNameValues()
-            .entrySet()
-            .stream()
-            .map(e -> e.getValue().toCompletionStage().exceptionally(error -> {
-                error = causeIfCompletionException(error);
+        do {
+            remainingTopics.clear();
 
-                if (!(error instanceof UnknownTopicOrPartitionException)) {
-                    log.warnf(error, "Error deleting topic %s: %s", e.getKey(), error.getMessage());
-                }
-                return null;
-            }))
-            .map(CompletionStage::toCompletableFuture)
-            .collect(awaitingAll())
-            .thenRun(() -> LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(5)))
-            .join();
+            adminClient.deleteTopics(topics)
+                .topicNameValues()
+                .entrySet()
+                .stream()
+                .map(e -> e.getValue().toCompletionStage().exceptionally(error -> {
+                    error = causeIfCompletionException(error);
+
+                    if (!(error instanceof UnknownTopicOrPartitionException)) {
+                        remainingTopics.add(e.getKey());
+                        log.warnf(error, "Error deleting topic %s: %s", e.getKey(), error.getMessage());
+                    }
+
+                    return null;
+                }))
+                .map(CompletionStage::toCompletableFuture)
+                .collect(awaitingAll())
+                .thenRun(() -> LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(5)))
+                .join();
+        } while (--deleteTopicsMax > 0 && !remainingTopics.isEmpty());
 
         var newTopics = topics.stream()
                 .map(t -> new NewTopic(t, partitionsPerTopic, (short) 3)
@@ -350,7 +359,8 @@ public class DataGenerator {
                     }
                 })
                 .exceptionally(error -> {
-                    log.warnf(error, "Error producing record: %s", error.getMessage());
+                    error = causeIfCompletionException(error);
+                    log.warnf("Error producing record: %s - %s", error.getClass().getName(), error.getMessage());
                     return null;
                 });
         }
@@ -364,7 +374,7 @@ public class DataGenerator {
         }
     }
 
-    public void consume(String clusterKey, ConsumerRecord<byte[], byte[]> rec) {
+    void consume(String clusterKey, ConsumerRecord<byte[], byte[]> rec) {
         TopicPartition topicPartition = new TopicPartition(rec.topic(), rec.partition());
         var currentCount = incrementAndGet(recordsConsumed, clusterKey, topicPartition);
 

@@ -389,7 +389,7 @@ public class DataGenerator {
                 long diff = latest.join() - earliest.join();
 
                 if (diff >= 5_000) {
-                    log.infof("Offset diff is %d, truncating partition %d to offset %d",
+                    log.infof("Offset diff is %d, truncating partition %s to offset %d",
                             diff, topicPartition, offset);
                     // Truncate the topic to the up to the previous offset
                     var recordsToDelete = Map.of(topicPartition, RecordsToDelete.beforeOffset(offset));
@@ -397,7 +397,7 @@ public class DataGenerator {
                         .all()
                         .toCompletionStage();
                 } else {
-                    log.debugf("Offset diff is %d for partition %d at offset %d", diff, topicPartition, offset);
+                    log.debugf("Offset diff is %d for partition %s at offset %d", diff, topicPartition, offset);
                     return CompletableFuture.completedStage(null);
                 }
             }, virtualExec)

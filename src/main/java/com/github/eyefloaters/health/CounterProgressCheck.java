@@ -46,6 +46,10 @@ abstract class CounterProgressCheck {
                             .put(partition, now);
                     } else {
                         log.infof("Counter %s/%s unchanged from %d", checkName, partition, prevCount);
+                        latestRecordActivityTimes
+                            .computeIfAbsent(clusterKey, k -> new ConcurrentHashMap<>(prevCounts.size()))
+                            // Only set the time if not set since startup
+                            .putIfAbsent(partition, now);
                     }
                 }));
         }
@@ -65,16 +69,16 @@ abstract class CounterProgressCheck {
                 .flatMap(Collection::stream)
                 .map(Map.Entry::getValue)
                 .min(Instant::compareTo)
-                .orElse(Instant.EPOCH)
-                .toString();
+                .map(Object::toString)
+                .orElse("none");
         String latestActivity = latestRecordActivityTimes.values()
                 .stream()
                 .map(Map::entrySet)
                 .flatMap(Collection::stream)
                 .map(Map.Entry::getValue)
                 .max(Instant::compareTo)
-                .orElse(Instant.EPOCH)
-                .toString();
+                .map(Object::toString)
+                .orElse("none");
         long currentCount = recordsCounts
                 .values()
                 .stream()

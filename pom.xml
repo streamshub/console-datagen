@@ -3,7 +3,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>com.github.eyefloaters</groupId>
   <artifactId>console-datagen</artifactId>
-  <version>0.2.2-SNAPSHOT</version>
+  <version>0.2.2</version>
   <properties>
     <compiler-plugin.version>3.12.1</compiler-plugin.version>
     <maven.compiler.release>21</maven.compiler.release>
@@ -19,7 +19,7 @@
   <scm>
     <connection>scm:git:git://github.com/eyefloaters/console-datagen.git</connection>
     <developerConnection>scm:git:git@github.com:eyefloaters/console-datagen.git</developerConnection>
-    <tag>HEAD</tag>
+    <tag>0.2.2</tag>
   </scm>
   <dependencyManagement>
     <dependencies>

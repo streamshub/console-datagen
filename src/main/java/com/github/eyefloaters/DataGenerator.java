@@ -34,8 +34,8 @@ import jakarta.enterprise.event.Startup;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Inject;
 import jakarta.inject.Named;
-import jakarta.json.Json;
 import jakarta.json.JsonObject;
+import jakarta.json.spi.JsonProvider;
 
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.ConsumerGroupListing;
@@ -122,6 +122,7 @@ public class DataGenerator {
 
     static ExecutorService virtualExec = Executors.newVirtualThreadPerTaskExecutor();
     static Faker faker = new Faker();
+    static JsonProvider json = JsonProvider.provider();
 
     AtomicBoolean running = new AtomicBoolean(true);
     Random generator = new Random();
@@ -347,12 +348,12 @@ public class DataGenerator {
             generator.nextBytes(buffer);
 
             Function<Beer, JsonObject> beerBuilder = beer ->
-                Json.createObjectBuilder()
+                json.createObjectBuilder()
                     .add("name", beer.name())
                     .add("style", beer.style())
                     .build();
 
-            byte[] key = Json.createObjectBuilder()
+            byte[] key = json.createObjectBuilder()
                     .add("storeId", faker.idNumber().valid())
                     .add("operatorId", faker.idNumber().valid())
                     .add("messageId", faker.idNumber().valid())
@@ -360,20 +361,20 @@ public class DataGenerator {
                     .toString()
                     .getBytes();
 
-            byte[] value = Json.createObjectBuilder()
+            byte[] value = json.createObjectBuilder()
                     .add("timestamp", Instant.now().toString())
-                    .add("user", Json.createObjectBuilder()
+                    .add("user", json.createObjectBuilder()
                         .add("lastName", faker.name().lastName())
                         .add("firstName", faker.name().firstName())
                         .add("birthDate", faker.date().birthday().toInstant().toString())
-                        .add("address", Json.createObjectBuilder()
+                        .add("address", json.createObjectBuilder()
                             .add("number", faker.address().streetAddressNumber())
                             .add("street", faker.address().streetName())
                             .add("city", faker.address().cityName())
                             .add("region", faker.address().state())
                             .add("postalCode", faker.address().zipCode())
                         )
-                        .add("favoriteBeers", Json.createArrayBuilder()
+                        .add("favoriteBeers", json.createArrayBuilder()
                             .add(beerBuilder.apply(faker.beer()))
                             .add(beerBuilder.apply(faker.beer()))
                         )

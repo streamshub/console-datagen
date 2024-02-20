@@ -35,6 +35,7 @@ import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Inject;
 import jakarta.inject.Named;
 import jakarta.json.Json;
+import jakarta.json.JsonObject;
 
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.ConsumerGroupListing;
@@ -59,6 +60,9 @@ import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 import org.jboss.logging.MDC;
+
+import com.github.javafaker.Beer;
+import com.github.javafaker.Faker;
 
 @ApplicationScoped
 public class DataGenerator {
@@ -101,11 +105,6 @@ public class DataGenerator {
     @Named("consumerConfigs")
     Map<String, Map<String, Object>> consumerConfigs;
 
-    static ExecutorService virtualExec = Executors.newVirtualThreadPerTaskExecutor();
-
-    AtomicBoolean running = new AtomicBoolean(true);
-    Random generator = new Random();
-
     @Produces
     @ApplicationScoped
     @Named("adminClients")
@@ -120,6 +119,13 @@ public class DataGenerator {
     @ApplicationScoped
     @Named("recordsConsumed")
     Map<String, Map<TopicPartition , Long>> recordsConsumed = new ConcurrentHashMap<>();
+
+    static ExecutorService virtualExec = Executors.newVirtualThreadPerTaskExecutor();
+    static Faker faker = new Faker();
+
+    AtomicBoolean running = new AtomicBoolean(true);
+    Random generator = new Random();
+
 
     void start(@Observes Startup startupEvent /* NOSONAR */) {
         if (!datagenEnabled) {
@@ -327,7 +333,7 @@ public class DataGenerator {
     }
 
     void produce(String clusterKey, Producer<byte[], byte[]> producer, List<String> topics) {
-        byte[] buffer = new byte[1000];
+        byte[] buffer = new byte[500];
         int t = 0;
         long start = System.currentTimeMillis();
         long rate = 100 * ((start / 10000) % 5) + 10;
@@ -340,16 +346,51 @@ public class DataGenerator {
 
             generator.nextBytes(buffer);
 
+            Function<Beer, JsonObject> beerBuilder = beer ->
+                Json.createObjectBuilder()
+                    .add("name", beer.name())
+                    .add("style", beer.style())
+                    .build();
+
+            byte[] key = Json.createObjectBuilder()
+                    .add("storeId", faker.idNumber().valid())
+                    .add("operatorId", faker.idNumber().valid())
+                    .add("messageId", faker.idNumber().valid())
+                    .build()
+                    .toString()
+                    .getBytes();
+
             byte[] value = Json.createObjectBuilder()
                     .add("timestamp", Instant.now().toString())
+                    .add("user", Json.createObjectBuilder()
+                        .add("lastName", faker.name().lastName())
+                        .add("firstName", faker.name().firstName())
+                        .add("birthDate", faker.date().birthday().toInstant().toString())
+                        .add("address", Json.createObjectBuilder()
+                            .add("number", faker.address().streetAddressNumber())
+                            .add("street", faker.address().streetName())
+                            .add("city", faker.address().cityName())
+                            .add("region", faker.address().state())
+                            .add("postalCode", faker.address().zipCode())
+                        )
+                        .add("favoriteBeers", Json.createArrayBuilder()
+                            .add(beerBuilder.apply(faker.beer()))
+                            .add(beerBuilder.apply(faker.beer()))
+                        )
+                    )
                     .add("payload", Base64.getEncoder().encodeToString(buffer))
                     .build()
                     .toString()
                     .getBytes();
 
-            String topic = topics.get(t++ % topics.size());
 
-            complete(producer.send(new ProducerRecord<>(topic, value)))
+
+            String topic = topics.get(t++ % topics.size());
+            var producerRecord = new ProducerRecord<>(topic, key, value);
+            producerRecord.headers().add("X-Country", faker.country().name().getBytes());
+            producerRecord.headers().add("X-Animal", faker.animal().name().getBytes());
+
+            complete(producer.send(producerRecord))
                 .thenAccept(meta -> {
                     TopicPartition topicPartition = new TopicPartition(meta.topic(), meta.partition());
                     var currentCount = incrementAndGet(recordsProduced, clusterKey, topicPartition);

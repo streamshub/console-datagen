@@ -12,6 +12,7 @@ import java.util.Set;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
@@ -30,7 +31,6 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.config.SslConfigs;
 import org.eclipse.microprofile.config.Config;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 import io.smallrye.common.annotation.Identifier;
@@ -45,23 +45,23 @@ public class ClientConfigFactory {
     Config config;
 
     @Inject
-    @ConfigProperty(name = "datagen.security.trust-certificates", defaultValue = "false")
-    boolean trustCertificates;
-
-    @Inject
-    @ConfigProperty(name = "datagen.kafka")
-    Map<String, String> clusterNames;
-
-    @Inject
     @Identifier("default-kafka-broker")
     Map<String, Object> defaultClusterConfigs;
+
+    @Inject
+    DataGenConfig datagenConfig;
+
+    Stream<Map.Entry<String, String>> clusterNames() {
+        return datagenConfig.kafka()
+                .entrySet()
+                .stream()
+                .map(e -> Map.entry(e.getKey(), e.getValue().name()));
+    }
 
     @Produces
     @Named("adminConfigs")
     Map<String, Map<String, Object>> getAdminConfigs() {
-        return clusterNames.entrySet()
-            .stream()
-            .map(cluster -> {
+        return clusterNames().map(cluster -> {
                 var configs = buildConfig(AdminClientConfig.configNames(), cluster.getKey());
                 logConfig("Admin[" + cluster.getKey() + ']', configs);
                 return Map.entry(unquote(cluster.getValue()), configs);
@@ -72,9 +72,7 @@ public class ClientConfigFactory {
     @Produces
     @Named("producerConfigs")
     Map<String, Map<String, Object>> getProducerConfigs() {
-        return clusterNames.entrySet()
-            .stream()
-            .map(cluster -> {
+        return clusterNames().map(cluster -> {
                 var configs = buildConfig(ProducerConfig.configNames(), cluster.getKey());
                 logConfig("Producer[" + cluster.getKey() + ']', configs);
                 return Map.entry(unquote(cluster.getValue()), configs);
@@ -85,9 +83,7 @@ public class ClientConfigFactory {
     @Produces
     @Named("consumerConfigs")
     Map<String, Map<String, Object>> getConsumerConfigs() {
-        return clusterNames.entrySet()
-            .stream()
-            .map(cluster -> {
+        return clusterNames().map(cluster -> {
                 Set<String> configNames = ConsumerConfig.configNames().stream()
                         // Do not allow a group Id to be set for this application
                         .filter(Predicate.not(ConsumerConfig.GROUP_ID_CONFIG::equals))
@@ -117,7 +113,7 @@ public class ClientConfigFactory {
     }
 
     Optional<String> getClusterConfig(String clusterKey, String configName) {
-        return config.getOptionalValue("datagen.kafka." + clusterKey + '.' + configName, String.class)
+        return config.getOptionalValue("datagen.kafka." + clusterKey + ".configs." + configName, String.class)
             .map(cfg -> {
                 log.tracef("OVERRIDE config %s for cluster %s", configName, clusterKey);
                 return unquote(cfg);
@@ -142,7 +138,8 @@ public class ClientConfigFactory {
         var securityProtocol = cfg.getOrDefault(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, "");
         var trustStoreMissing = !cfg.containsKey(SslConfigs.SSL_TRUSTSTORE_CERTIFICATES_CONFIG);
 
-        return trustCertificates && trustStoreMissing && securityProtocol.toString().contains("SSL");
+        return datagenConfig.security().trustCertificates()
+                && trustStoreMissing && securityProtocol.toString().contains("SSL");
     }
 
     void trustClusterCertificate(Map<String, Object> cfg) {

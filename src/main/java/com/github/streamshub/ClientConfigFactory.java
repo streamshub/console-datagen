@@ -1,4 +1,4 @@
-package com.github.eyefloaters;
+package com.github.streamshub;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;

@@ -1,4 +1,4 @@
-package com.github.eyefloaters;
+package com.github.streamshub;
 
 import java.time.Duration;
 import java.time.Instant;

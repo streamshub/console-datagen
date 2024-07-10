@@ -1,4 +1,4 @@
-package com.github.eyefloaters.health;
+package com.github.streamshub.health;
 
 import java.util.Map;
 
@@ -13,18 +13,18 @@ import org.eclipse.microprofile.health.Liveness;
 
 @Liveness
 @ApplicationScoped
-public class ProducerProgressCheck extends CounterProgressCheck implements HealthCheck {
+public class ConsumerProgressCheck extends CounterProgressCheck implements HealthCheck {
 
     @Inject
-    @Named("recordsProduced")
-    Map<String, Map<TopicPartition, Long>> recordsProduced;
+    @Named("recordsConsumed")
+    Map<String, Map<TopicPartition, Long>> recordsConsumed;
 
-    public ProducerProgressCheck() {
-        super("producer-progress");
+    public ConsumerProgressCheck() {
+        super("consumer-progress");
     }
 
     @Override
     public HealthCheckResponse call() {
-        return check(recordsProduced);
+        return check(recordsConsumed);
     }
 }

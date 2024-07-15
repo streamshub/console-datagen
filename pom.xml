@@ -14,7 +14,7 @@
     <quarkus.platform.version>3.12.2</quarkus.platform.version>
     <strimzi-oauth.version>0.15.0</strimzi-oauth.version>
     <skipITs>true</skipITs>
-    <surefire-plugin.version>3.3.0</surefire-plugin.version>
+    <surefire-plugin.version>3.3.1</surefire-plugin.version>
   </properties>
   <scm>
     <connection>scm:git:git://github.com/streamshub/console-datagen.git</connection>

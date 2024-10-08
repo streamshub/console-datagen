@@ -8,6 +8,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -90,6 +91,10 @@ public class DataGenerator {
     int partitionsPerTopic;
 
     @Inject
+    @ConfigProperty(name = "datagen.topic-replication-factor")
+    Optional<Short> topicReplicationFactor;
+
+    @Inject
     @ConfigProperty(name = "datagen.topic-name-template", defaultValue = TOPIC_NAME_TEMPLATE)
     String topicNameTemplate;
 
@@ -121,12 +126,11 @@ public class DataGenerator {
     Map<String, Map<TopicPartition , Long>> recordsConsumed = new ConcurrentHashMap<>();
 
     static ExecutorService virtualExec = Executors.newVirtualThreadPerTaskExecutor();
-    static Faker faker = new Faker();
     static JsonProvider json = JsonProvider.provider();
 
     AtomicBoolean running = new AtomicBoolean(true);
-    Random generator = new Random();
-
+    Random generator;
+    Faker faker;
 
     void start(@Observes Startup startupEvent /* NOSONAR */) {
         if (!datagenEnabled) {
@@ -134,6 +138,8 @@ public class DataGenerator {
             return;
         }
 
+        generator = new Random();
+        faker = new Faker(generator);
         AtomicInteger clientCount = new AtomicInteger(0);
 
         adminConfigs.forEach((clusterKey, configProperties) ->
@@ -303,7 +309,7 @@ public class DataGenerator {
         } while (--deleteTopicsMax > 0 && !remainingTopics.isEmpty());
 
         var newTopics = topics.stream()
-                .map(t -> new NewTopic(t, partitionsPerTopic, (short) 3)
+                .map(t -> new NewTopic(t, Optional.of(partitionsPerTopic), topicReplicationFactor)
                         .configs(Map.of(
                                 // 10 MiB
                                 "segment.bytes", Integer.toString(10 * 1024 * 1024),
@@ -338,7 +344,6 @@ public class DataGenerator {
         int t = 0;
         long start = System.currentTimeMillis();
         long rate = 100 * ((start / 10000) % 5) + 10;
-
 
         for (int i = 0; i < rate; i++) {
             if (!running.get()) {

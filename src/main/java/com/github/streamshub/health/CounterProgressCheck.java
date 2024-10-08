@@ -13,8 +13,14 @@ import jakarta.inject.Inject;
 import org.apache.kafka.common.TopicPartition;
 import org.eclipse.microprofile.health.HealthCheckResponse;
 import org.jboss.logging.Logger;
+import org.jboss.logging.Logger.Level;
 
 abstract class CounterProgressCheck {
+
+    static final Instant STARTUP = Instant.now();
+    static final Duration MINS3 = Duration.ofMinutes(3);
+    static final Duration MINS4 = Duration.ofMinutes(4);
+    static final Duration MINS5 = Duration.ofMinutes(5);
 
     @Inject
     Logger log;
@@ -47,9 +53,20 @@ abstract class CounterProgressCheck {
                     } else {
                         var lastUpdate = latestRecordActivityTimes
                             .computeIfAbsent(clusterKey, k -> new ConcurrentHashMap<>(prevCounts.size()))
-                            .get(partition);
+                            .getOrDefault(partition, STARTUP);
 
-                        log.infof("Counter %s/%s in cluster %s unchanged from %d at %s",
+                        Duration timeStale = Duration.between(lastUpdate, now);
+                        Level level;
+
+                        if (timeStale.compareTo(MINS3) < 0) {
+                            level = Level.DEBUG;
+                        } else if (timeStale.compareTo(MINS4) < 0) {
+                            level = Level.INFO;
+                        } else {
+                            level = Level.WARN;
+                        }
+
+                        log.logf(level, "Counter %s/%s in cluster %s unchanged from %d at %s",
                                 checkName, partition, clusterKey, prevCount, lastUpdate);
 
                         latestRecordActivityTimes
@@ -60,7 +77,7 @@ abstract class CounterProgressCheck {
                 }));
         }
 
-        Instant inactiveTime = Instant.now().minus(Duration.ofMinutes(5));
+        Instant inactiveTime = Instant.now().minus(MINS5);
 
         long inactivePartitions = latestRecordActivityTimes.values()
                 .stream()

@@ -95,6 +95,10 @@ public class DataGenerator {
     Optional<Short> topicReplicationFactor;
 
     @Inject
+    @ConfigProperty(name = "datagen.max-topic-depth", defaultValue = "5000")
+    int maxTopicDepth;
+
+    @Inject
     @ConfigProperty(name = "datagen.topic-name-template", defaultValue = TOPIC_NAME_TEMPLATE)
     String topicNameTemplate;
 
@@ -445,7 +449,7 @@ public class DataGenerator {
             .thenComposeAsync(nothing -> {
                 long diff = latest.join() - earliest.join();
 
-                if (diff >= 5_000) {
+                if (diff >= maxTopicDepth) {
                     log.infof("Offset diff is %d, truncating partition %s to offset %d",
                             diff, topicPartition, offset);
                     // Truncate the topic to the up to the previous offset

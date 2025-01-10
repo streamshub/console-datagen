@@ -66,6 +66,7 @@ import com.github.javafaker.Beer;
 import com.github.javafaker.Faker;
 
 @ApplicationScoped
+@SuppressWarnings("java:S6813")
 public class DataGenerator {
 
     static final String TOPIC_NAME_TEMPLATE = "console_datagen_%03d-%s";
@@ -101,6 +102,10 @@ public class DataGenerator {
     @Inject
     @ConfigProperty(name = "datagen.topic-name-template", defaultValue = TOPIC_NAME_TEMPLATE)
     String topicNameTemplate;
+
+    @Inject
+    @ConfigProperty(name = "datagen.compression-types", defaultValue = "none")
+    List<String> compressionTypes;
 
     @Inject
     @Named("adminConfigs")
@@ -175,10 +180,14 @@ public class DataGenerator {
                         String clientId = "console-datagen-producer-" + groupNumber + "-" + clientCount.incrementAndGet();
                         configs.put(ProducerConfig.CLIENT_ID_CONFIG, clientId);
 
+                        String compressionType = compressionTypes.get(groupNumber % compressionTypes.size());
+                        configs.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, compressionType);
+
                         MDC.put(CLUSTER_NAME_KEY, clusterKey);
                         MDC.put(ProducerConfig.CLIENT_ID_CONFIG, clientId);
 
-                        try (Producer<byte[], byte[]> producer = new KafkaProducer<>(producerConfigs.get(clusterKey))) {
+                        try (Producer<byte[], byte[]> producer = new KafkaProducer<>(configs)) {
+                            log.infof("Created producer %s with compression %s", clientId, compressionType);
                             while (running.get()) {
                                 produce(clusterKey, producer, topics);
                             }
@@ -201,6 +210,7 @@ public class DataGenerator {
                         MDC.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId);
 
                         try (Consumer<byte[], byte[]> consumer = new KafkaConsumer<>(configs)) {
+                            log.infof("Created consumer %s", clientId);
                             consumer.subscribe(topics);
 
                             while (running.get()) {

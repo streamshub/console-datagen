@@ -12,7 +12,7 @@
     <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
     <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
     <quarkus.platform.version>3.21.3</quarkus.platform.version>
-    <strimzi-oauth.version>0.16.1</strimzi-oauth.version>
+    <strimzi-oauth.version>0.16.2</strimzi-oauth.version>
     <skipITs>true</skipITs>
     <surefire-plugin.version>3.5.3</surefire-plugin.version>
   </properties>

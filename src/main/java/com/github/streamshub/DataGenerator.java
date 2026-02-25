@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -23,10 +24,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.stream.Collector;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
@@ -39,21 +43,24 @@ import jakarta.json.JsonObject;
 import jakarta.json.spi.JsonProvider;
 
 import org.apache.kafka.clients.admin.Admin;
-import org.apache.kafka.clients.admin.ConsumerGroupListing;
-import org.apache.kafka.clients.admin.ListConsumerGroupsOptions;
+import org.apache.kafka.clients.admin.GroupListing;
+import org.apache.kafka.clients.admin.ListGroupsOptions;
 import org.apache.kafka.clients.admin.ListOffsetsResult.ListOffsetsResultInfo;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.admin.OffsetSpec;
 import org.apache.kafka.clients.admin.RecordsToDelete;
-import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.KafkaShareConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
-import org.apache.kafka.common.ConsumerGroupState;
+import org.apache.kafka.common.GroupState;
+import org.apache.kafka.common.GroupType;
+import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.GroupIdNotFoundException;
 import org.apache.kafka.common.errors.GroupNotEmptyException;
@@ -65,43 +72,20 @@ import org.jboss.logging.MDC;
 import com.github.javafaker.Beer;
 import com.github.javafaker.Faker;
 
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.mapping;
+import static java.util.stream.Collectors.toList;
+
 @ApplicationScoped
-@SuppressWarnings("java:S6813")
 public class DataGenerator {
 
-    static final String TOPIC_NAME_TEMPLATE = "console_datagen_%03d-%s";
     static final String CLUSTER_NAME_KEY = "cluster.name";
 
     @Inject
     Logger log;
 
     @Inject
-    @ConfigProperty(name = "datagen.enabled", defaultValue = "true")
-    boolean datagenEnabled;
-
-    @Inject
-    @ConfigProperty(name = "datagen.consumer-groups", defaultValue = "1")
-    int consumerCount;
-
-    @Inject
-    @ConfigProperty(name = "datagen.topics-per-consumer", defaultValue = "1")
-    int topicsPerConsumer;
-
-    @Inject
-    @ConfigProperty(name = "datagen.partitions-per-topic", defaultValue = "1")
-    int partitionsPerTopic;
-
-    @Inject
-    @ConfigProperty(name = "datagen.topic-replication-factor")
-    Optional<Short> topicReplicationFactor;
-
-    @Inject
-    @ConfigProperty(name = "datagen.max-topic-depth", defaultValue = "5000")
-    int maxTopicDepth;
-
-    @Inject
-    @ConfigProperty(name = "datagen.topic-name-template", defaultValue = TOPIC_NAME_TEMPLATE)
-    String topicNameTemplate;
+    DataGenConfig config;
 
     @Inject
     @ConfigProperty(name = "datagen.compression-types", defaultValue = "none")
@@ -142,7 +126,7 @@ public class DataGenerator {
     Faker faker;
 
     void start(@Observes Startup startupEvent /* NOSONAR */) {
-        if (!datagenEnabled) {
+        if (!config.enabled()) {
             log.info("datagen.enabled=false ; producers and consumers will not be started");
             return;
         }
@@ -155,75 +139,50 @@ public class DataGenerator {
             virtualExec.submit(() -> {
                 MDC.put(CLUSTER_NAME_KEY, clusterKey);
 
-                var allTopics = IntStream
-                        .range(0, consumerCount)
-                        .mapToObj(groupNumber -> IntStream
-                                .range(0, topicsPerConsumer)
-                                .mapToObj(t -> topicNameTemplate.formatted(groupNumber, (char) ('a' + t))))
-                        .flatMap(Function.identity())
-                        .toList();
+                List<String> allTopics = new ArrayList<>();
+                allTopics.addAll(generateTopicNames("consumer", config.consumerGroupCount()));
+                allTopics.addAll(generateTopicNames("share", config.shareGroupCount()));
 
                 initializeCounts(clusterKey, allTopics);
 
                 Admin adminClient = Admin.create(configProperties);
                 adminClients.put(clusterKey, adminClient);
 
-                initialize(clusterKey, adminClient, allTopics, partitionsPerTopic);
+                initialize(clusterKey, adminClient, allTopics, config.partitionsPerTopic());
 
-                IntStream.range(0, consumerCount).forEach(groupNumber -> {
-                    var topics = IntStream.range(0, topicsPerConsumer)
-                            .mapToObj(t -> topicNameTemplate.formatted(groupNumber, (char) ('a' + t)))
-                            .toList();
+                if (config.consumerGroupCount() > 0) {
+                    startGroups("consumer",
+                            config.consumerGroupCount(),
+                            clusterKey,
+                            clientCount,
+                            props -> new KafkaConsumer<byte[], byte[]>(props),
+                            KafkaConsumer::subscribe,
+                            KafkaConsumer::poll);
+                }
 
-                    virtualExec.submit(() -> {
-                        var configs = new HashMap<>(producerConfigs.get(clusterKey));
-                        String clientId = "console-datagen-producer-" + groupNumber + "-" + clientCount.incrementAndGet();
-                        configs.put(ProducerConfig.CLIENT_ID_CONFIG, clientId);
-
-                        String compressionType = compressionTypes.get(groupNumber % compressionTypes.size());
-                        configs.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, compressionType);
-
-                        MDC.put(CLUSTER_NAME_KEY, clusterKey);
-                        MDC.put(ProducerConfig.CLIENT_ID_CONFIG, clientId);
-
-                        try (Producer<byte[], byte[]> producer = new KafkaProducer<>(configs)) {
-                            log.infof("Created producer %s with compression %s", clientId, compressionType);
-                            while (running.get()) {
-                                produce(clusterKey, producer, topics);
-                            }
-                        } catch (Exception e) {
-                            log.warnf(e, "Error producing: %s", e.getMessage());
-                        }
-
-                        log.infof("Run loop complete for producer %d on cluster %s", groupNumber, clusterKey);
-                    });
-
-                    virtualExec.submit(() -> {
-                        var configs = new HashMap<>(consumerConfigs.get(clusterKey));
-                        String groupId = "console-datagen-group-" + groupNumber;
-                        String clientId = "console-datagen-consumer-" + groupNumber + "-" + clientCount.incrementAndGet();
-
-                        configs.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
-                        configs.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId);
-
-                        MDC.put(CLUSTER_NAME_KEY, clusterKey);
-                        MDC.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId);
-
-                        try (Consumer<byte[], byte[]> consumer = new KafkaConsumer<>(configs)) {
-                            log.infof("Created consumer %s", clientId);
-                            consumer.subscribe(topics);
-
-                            while (running.get()) {
-                                consumer.poll(Duration.ofSeconds(2)).forEach(rec -> consume(clusterKey, rec));
-                            }
-                        } catch (Exception e) {
-                            log.warnf(e, "Error consuming: %s", e.getMessage());
-                        }
-
-                        log.infof("Run loop complete for consumer group %s", groupId);
-                    });
-                });
+                if (config.shareGroupCount() > 0) {
+                    startGroups("share",
+                            config.shareGroupCount(),
+                            clusterKey,
+                            clientCount,
+                            props -> new KafkaShareConsumer<byte[], byte[]>(props),
+                            KafkaShareConsumer::subscribe,
+                            KafkaShareConsumer::poll);
+                }
             }));
+    }
+
+    List<String> generateTopicNames(String type, int count) {
+        return IntStream.range(0, count)
+            .mapToObj(groupNumber -> generateGroupTopicNames(type, groupNumber))
+            .flatMap(Function.identity())
+            .toList();
+    }
+
+    Stream<String> generateGroupTopicNames(String type, int groupNumber) {
+        return IntStream
+                .range(0, config.topicsPerMember())
+                .mapToObj(t -> config.topicPattern().formatted(groupNumber, type + '-' + ((char) ('a' + t))));
     }
 
     void stop(@Observes Shutdown shutdownEvent /* NOSONAR */) throws Exception {
@@ -242,7 +201,7 @@ public class DataGenerator {
     void initializeCounts(String clusterKey, List<String> topics) {
         Map<TopicPartition, Long> initialCounts = topics.stream()
                 .flatMap(topic -> IntStream
-                        .range(0, partitionsPerTopic)
+                        .range(0, config.partitionsPerTopic())
                         .mapToObj(p -> new TopicPartition(topic, p)))
                 .map(topicPartition -> Map.entry(topicPartition, 0L))
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
@@ -262,34 +221,49 @@ public class DataGenerator {
             .toCompletableFuture()
             .join();
 
-        List<String> dataGenGroups = adminClient.listConsumerGroups(new ListConsumerGroupsOptions()
-                .inStates(Set.of(ConsumerGroupState.EMPTY)))
+        Map<GroupType, List<String>> dataGenGroups = adminClient.listGroups(new ListGroupsOptions()
+                .inGroupStates(Set.of(GroupState.EMPTY)))
             .all()
             .toCompletionStage()
             .toCompletableFuture()
             .join()
             .stream()
-            .map(ConsumerGroupListing::groupId)
-            .filter(name -> name.startsWith("console-datagen-group-"))
-            .collect(Collectors.toCollection(ArrayList::new));
+            .filter(group -> group.groupId().startsWith("console-datagen-group-"))
+            .collect(groupingBy(
+                    group -> group.type().orElse(GroupType.UNKNOWN),
+                    mapping(GroupListing::groupId, toList())));
 
         log.infof("Deleting existing consumer groups %s", dataGenGroups);
 
-        adminClient.deleteConsumerGroups(dataGenGroups)
-            .deletedGroups()
-            .entrySet()
+        dataGenGroups.entrySet()
             .stream()
-            .map(e -> e.getValue().toCompletionStage().exceptionally(error -> {
-                error = causeIfCompletionException(error);
-
-                if (error instanceof GroupNotEmptyException) {
-                    log.warnf("Consumer group %s is not empty and cannot be deleted", e.getKey());
-                } else if (error instanceof GroupIdNotFoundException) {
-                    // Ignore
-                } else {
-                    log.warnf(error, "Error deleting consumer group %s: %s", e.getKey(), error.getMessage());
+            .<Map<String, KafkaFuture<Void>>>map(entry -> {
+                switch (entry.getKey()) {
+                    case CLASSIC, CONSUMER:
+                        return adminClient.deleteConsumerGroups(entry.getValue())
+                                .deletedGroups();
+                    case SHARE:
+                        return adminClient.deleteShareGroups(entry.getValue())
+                                .deletedGroups();
+                    case STREAMS:
+                        return adminClient.deleteShareGroups(entry.getValue())
+                                .deletedGroups();
+                    default:
+                        return java.util.Collections.emptyMap();
                 }
-                return null;
+            })
+            .flatMap(deleted -> deleted.entrySet().stream())
+            .map(e -> e.getValue().toCompletionStage().exceptionally(error -> {
+                  error = causeIfCompletionException(error);
+
+                  if (error instanceof GroupNotEmptyException) {
+                      log.warnf("Group %s is not empty and cannot be deleted", e.getKey());
+                  } else if (error instanceof GroupIdNotFoundException) {
+                      // Ignore
+                  } else {
+                      log.warnf(error, "Error deleting group %s: %s", e.getKey(), error.getMessage());
+                  }
+                  return null;
             }))
             .map(CompletionStage::toCompletableFuture)
             .collect(awaitingAll())
@@ -323,7 +297,7 @@ public class DataGenerator {
         } while (--deleteTopicsMax > 0 && !remainingTopics.isEmpty());
 
         var newTopics = topics.stream()
-                .map(t -> new NewTopic(t, Optional.of(partitionsPerTopic), topicReplicationFactor)
+                .map(t -> new NewTopic(t, Optional.of(partitionsPerTopic), config.topicReplicationFactor())
                         .configs(Map.of(
                                 // 10 MiB
                                 "segment.bytes", Integer.toString(10 * 1024 * 1024),
@@ -347,6 +321,66 @@ public class DataGenerator {
             .thenRun(() -> LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(5)))
             .thenRun(() -> log.infof("Topics created: %s", topics))
             .join();
+    }
+
+    <C extends AutoCloseable> void startGroups(String type, int count, String clusterKey, AtomicInteger clientCount,
+            Function<Map<String, Object>, C> factory,
+            BiConsumer<C, Collection<String>> subscribe,
+            BiFunction<C, Duration, ConsumerRecords<?, ?>> poll) {
+
+        for (int g = 0; g < count; g++) {
+            var groupNumber = g;
+            var topics = generateGroupTopicNames(type, groupNumber).toList();
+
+            virtualExec.submit(() -> {
+                var configs = new HashMap<>(producerConfigs.get(clusterKey));
+                String clientId = "console-datagen-producer-%s-%d-%d".formatted(type, groupNumber, clientCount.incrementAndGet());
+                configs.put(ProducerConfig.CLIENT_ID_CONFIG, clientId);
+
+                String compressionType = compressionTypes.get(groupNumber % compressionTypes.size());
+                configs.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, compressionType);
+
+                MDC.put(CLUSTER_NAME_KEY, clusterKey);
+                MDC.put(ProducerConfig.CLIENT_ID_CONFIG, clientId);
+
+                try (Producer<byte[], byte[]> producer = new KafkaProducer<>(configs)) {
+                    log.infof("Created producer %s with compression %s", clientId, compressionType);
+                    while (running.get()) {
+                        produce(clusterKey, producer, topics);
+                    }
+                } catch (Exception e) {
+                    log.warnf(e, "Error producing: %s", e.getMessage());
+                }
+
+                log.infof("Run loop complete for producer %d on cluster %s", groupNumber, clusterKey);
+            });
+
+            virtualExec.submit(() -> {
+                var configs = new HashMap<>(consumerConfigs.get(clusterKey));
+                String groupId = "console-datagen-group-%s-%d".formatted(type, groupNumber);
+                String clientId = "console-datagen-consumer-%s-%d-%d".formatted(type, groupNumber, clientCount.incrementAndGet());
+
+                configs.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
+                configs.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId);
+
+                MDC.put(CLUSTER_NAME_KEY, clusterKey);
+                MDC.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId);
+
+                try (C consumer = factory.apply(configs)) {
+                    log.infof("Created consumer %s", clientId);
+                    subscribe.accept(consumer, topics);
+
+                    while (running.get()) {
+                        poll.apply(consumer, Duration.ofSeconds(2))
+                            .forEach(rec -> consume(clusterKey, rec));
+                    }
+                } catch (Exception e) {
+                    log.warnf(e, "Error consuming: %s", e.getMessage());
+                }
+
+                log.infof("Run loop complete for group %s", groupId);
+            });
+        }
     }
 
     Throwable causeIfCompletionException(Throwable thrown) {
@@ -435,7 +469,7 @@ public class DataGenerator {
         }
     }
 
-    void consume(String clusterKey, ConsumerRecord<byte[], byte[]> rec) {
+    void consume(String clusterKey, ConsumerRecord<?, ?> rec) {
         TopicPartition topicPartition = new TopicPartition(rec.topic(), rec.partition());
         var currentCount = incrementAndGet(recordsConsumed, clusterKey, topicPartition);
 
@@ -448,7 +482,7 @@ public class DataGenerator {
 
     long incrementAndGet(Map<String, Map<TopicPartition , Long>> counters, String clusterKey, TopicPartition topicPartition) {
         return counters.get(clusterKey)
-            .compute(topicPartition, (k, v) -> v == null ? 1 : v + 1);
+            .compute(topicPartition, (_, v) -> v == null ? 1 : v + 1);
     }
 
     void maybeDeleteRecords(Admin adminClient, TopicPartition topicPartition, Long offset) {
@@ -456,10 +490,10 @@ public class DataGenerator {
         var latest = getOffset(adminClient, topicPartition, OffsetSpec.latest());
 
         CompletableFuture.allOf(earliest, latest)
-            .thenComposeAsync(nothing -> {
+            .thenComposeAsync(_ -> {
                 long diff = latest.join() - earliest.join();
 
-                if (diff >= maxTopicDepth) {
+                if (diff >= config.maxTopicDepth()) {
                     log.infof("Offset diff is %d, truncating partition %s to offset %d",
                             diff, topicPartition, offset);
                     // Truncate the topic to the up to the previous offset

@@ -48,11 +48,11 @@ abstract class CounterProgressCheck {
                     if (currentCount > prevCount) {
                         log.debugf("Counter %s/%s increased from %d to %d", checkName, partition, prevCount, currentCount);
                         latestRecordActivityTimes
-                            .computeIfAbsent(clusterKey, k -> new ConcurrentHashMap<>(prevCounts.size()))
+                            .computeIfAbsent(clusterKey, _ -> new ConcurrentHashMap<>(prevCounts.size()))
                             .put(partition, now);
                     } else {
                         var lastUpdate = latestRecordActivityTimes
-                            .computeIfAbsent(clusterKey, k -> new ConcurrentHashMap<>(prevCounts.size()))
+                            .computeIfAbsent(clusterKey, _ -> new ConcurrentHashMap<>(prevCounts.size()))
                             .getOrDefault(partition, STARTUP);
 
                         Duration timeStale = Duration.between(lastUpdate, now);
@@ -70,7 +70,7 @@ abstract class CounterProgressCheck {
                                 checkName, partition, clusterKey, prevCount, lastUpdate);
 
                         latestRecordActivityTimes
-                            .computeIfAbsent(clusterKey, k -> new ConcurrentHashMap<>(prevCounts.size()))
+                            .computeIfAbsent(clusterKey, _ -> new ConcurrentHashMap<>(prevCounts.size()))
                             // Only set the time if not set since startup
                             .putIfAbsent(partition, now);
                     }

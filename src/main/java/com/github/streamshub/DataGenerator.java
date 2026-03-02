@@ -8,6 +8,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
@@ -182,7 +183,9 @@ public class DataGenerator {
     Stream<String> generateGroupTopicNames(String type, int groupNumber) {
         return IntStream
                 .range(0, config.topicsPerMember())
-                .mapToObj(t -> config.topicPattern().formatted(groupNumber, type + '-' + ((char) ('a' + t))));
+                // shift by 10 for the suffix to match previous behavior
+                .mapToObj(t -> Integer.toString(t + 10, 36).toLowerCase(Locale.ROOT))
+                .map(suffix -> config.topicPattern().formatted(groupNumber, type + '-' + suffix));
     }
 
     void stop(@Observes Shutdown shutdownEvent /* NOSONAR */) throws Exception {
@@ -245,9 +248,10 @@ public class DataGenerator {
                     case SHARE:
                         return adminClient.deleteShareGroups(entry.getValue())
                                 .deletedGroups();
-                    case STREAMS:
-                        return adminClient.deleteShareGroups(entry.getValue())
-                                .deletedGroups();
+                    // Enabled with next feature to support Streams groups
+                    //case STREAMS:
+                    //    return adminClient.deleteStreamsGroups(entry.getValue())
+                    //            .deletedGroups();
                     default:
                         return java.util.Collections.emptyMap();
                 }

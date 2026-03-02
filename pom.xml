@@ -6,12 +6,13 @@
   <version>0.5.1-SNAPSHOT</version>
   <properties>
     <compiler-plugin.version>3.15.0</compiler-plugin.version>
-    <maven.compiler.release>21</maven.compiler.release>
+    <maven.compiler.release>25</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
     <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
     <quarkus.platform.version>3.31.4</quarkus.platform.version>
+    <kafka-clients.version>4.2.0</kafka-clients.version>
     <strimzi-oauth.version>0.17.1</strimzi-oauth.version>
     <skipITs>true</skipITs>
     <surefire-plugin.version>3.5.5</surefire-plugin.version>
@@ -23,6 +24,11 @@
   </scm>
   <dependencyManagement>
     <dependencies>
+      <dependency>
+        <groupId>org.apache.kafka</groupId>
+        <artifactId>kafka-clients</artifactId>
+        <version>${kafka-clients.version}</version>
+      </dependency>
       <dependency>
         <groupId>${quarkus.platform.group-id}</groupId>
         <artifactId>${quarkus.platform.artifact-id}</artifactId>

@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -66,6 +67,12 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.GroupIdNotFoundException;
 import org.apache.kafka.common.errors.GroupNotEmptyException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
+import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.streams.KafkaStreams;
+import org.apache.kafka.streams.StreamsBuilder;
+import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.kstream.KStream;
+import org.apache.kafka.streams.processor.api.ProcessorContext;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 import org.jboss.logging.MDC;
@@ -143,6 +150,7 @@ public class DataGenerator {
                 List<String> allTopics = new ArrayList<>();
                 allTopics.addAll(generateTopicNames("consumer", config.consumerGroupCount()));
                 allTopics.addAll(generateTopicNames("share", config.shareGroupCount()));
+                allTopics.addAll(generateTopicNames("streams", config.streamsGroupCount()));
 
                 initializeCounts(clusterKey, allTopics);
 
@@ -156,7 +164,7 @@ public class DataGenerator {
                             config.consumerGroupCount(),
                             clusterKey,
                             clientCount,
-                            props -> new KafkaConsumer<byte[], byte[]>(props),
+                            (props, _) -> new KafkaConsumer<byte[], byte[]>(props),
                             KafkaConsumer::subscribe,
                             KafkaConsumer::poll);
                 }
@@ -166,9 +174,22 @@ public class DataGenerator {
                             config.shareGroupCount(),
                             clusterKey,
                             clientCount,
-                            props -> new KafkaShareConsumer<byte[], byte[]>(props),
+                            (props, _) -> new KafkaShareConsumer<byte[], byte[]>(props),
                             KafkaShareConsumer::subscribe,
                             KafkaShareConsumer::poll);
+                }
+
+                if (config.streamsGroupCount() > 0) {
+                    startGroups("streams",
+                            config.streamsGroupCount(),
+                            clusterKey,
+                            clientCount,
+                            (props, topics) -> createStreams(clusterKey, props, topics),
+                            (_, _) -> { /* Subscribe for KafkaStreams is no-op */ },
+                            (_, duration) -> {
+                                LockSupport.parkNanos(duration.toNanos());
+                                return ConsumerRecords.EMPTY;
+                            } /* Poll for KafkaStreams is no-op */);
                 }
             }));
     }
@@ -248,10 +269,9 @@ public class DataGenerator {
                     case SHARE:
                         return adminClient.deleteShareGroups(entry.getValue())
                                 .deletedGroups();
-                    // Enabled with next feature to support Streams groups
-                    //case STREAMS:
-                    //    return adminClient.deleteStreamsGroups(entry.getValue())
-                    //            .deletedGroups();
+                    case STREAMS:
+                        return adminClient.deleteStreamsGroups(entry.getValue())
+                                .deletedGroups();
                     default:
                         return java.util.Collections.emptyMap();
                 }
@@ -328,7 +348,7 @@ public class DataGenerator {
     }
 
     <C extends AutoCloseable> void startGroups(String type, int count, String clusterKey, AtomicInteger clientCount,
-            Function<Map<String, Object>, C> factory,
+            BiFunction<Map<String, Object>, List<String>, C> factory,
             BiConsumer<C, Collection<String>> subscribe,
             BiFunction<C, Duration, ConsumerRecords<?, ?>> poll) {
 
@@ -359,32 +379,73 @@ public class DataGenerator {
                 log.infof("Run loop complete for producer %d on cluster %s", groupNumber, clusterKey);
             });
 
-            virtualExec.submit(() -> {
-                var configs = new HashMap<>(consumerConfigs.get(clusterKey));
-                String groupId = "console-datagen-group-%s-%d".formatted(type, groupNumber);
-                String clientId = "console-datagen-consumer-%s-%d-%d".formatted(type, groupNumber, clientCount.incrementAndGet());
+            String groupId = "console-datagen-group-%s-%d".formatted(type, groupNumber);
 
-                configs.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
-                configs.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId);
+            for (int m = 0; m < config.membersPerGroup(); m++) {
+                virtualExec.submit(() -> {
+                    var configs = new HashMap<>(consumerConfigs.get(clusterKey));
+                    configs.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
 
-                MDC.put(CLUSTER_NAME_KEY, clusterKey);
-                MDC.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId);
+                    String clientId = "console-datagen-consumer-%s-%d-%d".formatted(type, groupNumber, clientCount.incrementAndGet());
+                    configs.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId);
 
-                try (C consumer = factory.apply(configs)) {
-                    log.infof("Created consumer %s", clientId);
-                    subscribe.accept(consumer, topics);
+                    MDC.put(CLUSTER_NAME_KEY, clusterKey);
+                    MDC.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId);
 
-                    while (running.get()) {
-                        poll.apply(consumer, Duration.ofSeconds(2))
-                            .forEach(rec -> consume(clusterKey, rec));
+                    try (C consumer = factory.apply(configs, topics)) {
+                        log.infof("Created consumer %s", clientId);
+                        subscribe.accept(consumer, topics);
+
+                        while (running.get()) {
+                            poll.apply(consumer, Duration.ofSeconds(2))
+                                .forEach(rec -> consume(clusterKey, rec));
+                        }
+                    } catch (Exception e) {
+                        log.warnf(e, "Error consuming: %s", e.getMessage());
                     }
-                } catch (Exception e) {
-                    log.warnf(e, "Error consuming: %s", e.getMessage());
-                }
 
-                log.infof("Run loop complete for group %s", groupId);
-            });
+                    log.infof("Run loop complete for group %s; client %s", groupId, clientId);
+                });
+            }
         }
+    }
+
+    private KafkaStreams createStreams(String clusterKey, Map<String, Object> props, List<String> topics) {
+        props.put(StreamsConfig.APPLICATION_ID_CONFIG, props.get(ConsumerConfig.GROUP_ID_CONFIG));
+        props.put(StreamsConfig.GROUP_PROTOCOL_CONFIG, GroupType.STREAMS.name().toLowerCase(Locale.ROOT));
+        props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.StringSerde.class);
+        props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.StringSerde.class);
+
+        StreamsBuilder builder = new StreamsBuilder();
+        KStream<String, String> stream = builder.stream(topics);
+        stream.process(() -> new org.apache.kafka.streams.processor.api.Processor<String, String, Void, Void>() {
+            private org.apache.kafka.streams.processor.api.ProcessorContext<Void, Void> context;
+
+            @Override
+            public void init(final ProcessorContext<Void, Void> context) {
+                this.context = context;
+            }
+
+            @Override
+            public void process(org.apache.kafka.streams.processor.api.Record<String, String> streamRec) {
+                var meta = context.recordMetadata().orElseThrow();
+                var rec = new ConsumerRecord<String, String>(
+                        meta.topic(),
+                        meta.partition(),
+                        meta.offset(),
+                        streamRec.key(),
+                        streamRec.value()
+                );
+
+                consume(clusterKey, rec);
+            }
+        });
+
+        Properties properties = new Properties();
+        props.forEach(properties::put);
+        KafkaStreams streams = new KafkaStreams(builder.build(), properties);
+        streams.start();
+        return streams;
     }
 
     Throwable causeIfCompletionException(Throwable thrown) {

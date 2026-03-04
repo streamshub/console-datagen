@@ -14,6 +14,10 @@ public interface DataGenConfig {
 
     int shareGroupCount();
 
+    int streamsGroupCount();
+
+    int membersPerGroup();
+
     int topicsPerMember();
 
     int partitionsPerTopic();

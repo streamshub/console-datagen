@@ -67,15 +67,12 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.GroupIdNotFoundException;
 import org.apache.kafka.common.errors.GroupNotEmptyException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
-import org.apache.kafka.common.serialization.Deserializer;
-import org.apache.kafka.common.serialization.Serde;
-import org.apache.kafka.common.serialization.Serializer;
-import org.apache.kafka.common.serialization.StringDeserializer;
-import org.apache.kafka.common.serialization.StringSerializer;
+import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.kstream.KStream;
+import org.apache.kafka.streams.processor.api.ProcessorContext;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 import org.jboss.logging.MDC;
@@ -187,9 +184,12 @@ public class DataGenerator {
                             config.streamsGroupCount(),
                             clusterKey,
                             clientCount,
-                            DataGenerator::createStreams,
+                            (props, topics) -> createStreams(clusterKey, props, topics),
                             (_, _) -> { /* Subscribe for KafkaStreams is no-op */ },
-                            (_, _) -> ConsumerRecords.EMPTY /* Poll for KafkaStreams is no-op */);
+                            (_, duration) -> {
+                                LockSupport.parkNanos(duration.toNanos());
+                                return ConsumerRecords.EMPTY;
+                            } /* Poll for KafkaStreams is no-op */);
                 }
             }));
     }
@@ -410,27 +410,35 @@ public class DataGenerator {
         }
     }
 
-    public static class StringSerde implements Serde<String> {
-        @Override
-        public Deserializer<String> deserializer() {
-            return new StringDeserializer();
-        }
-        @Override
-        public Serializer<String> serializer() {
-            return new StringSerializer();
-        }
-    }
-
-    private static KafkaStreams createStreams(Map<String, Object> props, List<String> topics) {
+    private KafkaStreams createStreams(String clusterKey, Map<String, Object> props, List<String> topics) {
         props.put(StreamsConfig.APPLICATION_ID_CONFIG, props.get(ConsumerConfig.GROUP_ID_CONFIG));
         props.put(StreamsConfig.GROUP_PROTOCOL_CONFIG, GroupType.STREAMS.name().toLowerCase(Locale.ROOT));
-        props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, StringSerde.class);
-        props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, StringSerde.class);
+        props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.StringSerde.class);
+        props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.StringSerde.class);
 
         StreamsBuilder builder = new StreamsBuilder();
         KStream<String, String> stream = builder.stream(topics);
-        stream.foreach((_, _) -> {
-            // No-op
+        stream.process(() -> new org.apache.kafka.streams.processor.api.Processor<String, String, Void, Void>() {
+            private org.apache.kafka.streams.processor.api.ProcessorContext<Void, Void> context;
+
+            @Override
+            public void init(final ProcessorContext<Void, Void> context) {
+                this.context = context;
+            }
+
+            @Override
+            public void process(org.apache.kafka.streams.processor.api.Record<String, String> streamRec) {
+                var meta = context.recordMetadata().orElseThrow();
+                var rec = new ConsumerRecord<String, String>(
+                        meta.topic(),
+                        meta.partition(),
+                        meta.offset(),
+                        streamRec.key(),
+                        streamRec.value()
+                );
+
+                consume(clusterKey, rec);
+            }
         });
 
         Properties properties = new Properties();

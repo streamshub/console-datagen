@@ -15,7 +15,7 @@
     <kafka-clients.version>4.3.0</kafka-clients.version>
     <strimzi-oauth.version>0.17.1</strimzi-oauth.version>
     <skipITs>true</skipITs>
-    <surefire-plugin.version>3.5.5</surefire-plugin.version>
+    <surefire-plugin.version>3.5.6</surefire-plugin.version>
   </properties>
   <scm>
     <connection>scm:git:git://github.com/streamshub/console-datagen.git</connection>
